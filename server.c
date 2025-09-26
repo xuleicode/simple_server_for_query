@@ -6,7 +6,9 @@
 #include <event2/buffer.h>
 #include <event2/util.h>
 #include <unistd.h>
-#include <signal.h>
+#include <ctype.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 // 调试宏定义
 #ifdef DEBUG
@@ -20,60 +22,46 @@
 #define DEBUG_PRINT(fmt, ...) do {} while (0)
 #endif
 
-// HTML 页面内容
-const char* index_html = 
-"<!DOCTYPE html>"
-"<html>"
-"<head>"
-"    <title>字符串提交</title>"
-"    <meta charset=\"UTF-8\">"
-"    <style>"
-"        body { font-family: Arial, sans-serif; margin: 40px; }"
-"        .container { max-width: 500px; margin: 0 auto; }"
-"        .form-group { margin-bottom: 20px; }"
-"        label { display: block; margin-bottom: 5px; font-weight: bold; }"
-"        input[type=\"text\"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }"
-"        button { background-color: #4CAF50; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }"
-"        button:hover { background-color: #45a049; }"
-"        .result { margin-top: 20px; padding: 10px; background-color: #f5f5f5; border-radius: 4px; }"
-"    </style>"
-"</head>"
-"<body>"
-"    <div class=\"container\">"
-"        <h1>字符串提交示例</h1>"
-"        <form id=\"stringForm\" method=\"POST\">"
-"            <div class=\"form-group\">"
-"                <label for=\"inputString\">请输入字符串:</label>"
-"                <input type=\"text\" id=\"inputString\" name=\"inputString\" required>"
-"            </div>"
-"            <button type=\"submit\">提交</button>"
-"        </form>"
-"        <div id=\"result\" class=\"result\"></div>"
-"    </div>"
-"    <script>"
-"        document.getElementById('stringForm').addEventListener('submit', function(e) {"
-"            e.preventDefault();"
-"            const formData = new FormData(this);"
-"            "
-"            fetch('/submit', {"
-"                method: 'POST',"
-"                body: formData"
-"            })"
-"            .then(response => response.text())"
-"            .then(data => {"
-"                document.getElementById('result').innerHTML = '<strong>服务器响应:</strong> ' + data;"
-"            })"
-"            .catch(error => {"
-"                document.getElementById('result').innerHTML = '<strong>错误:</strong> ' + error;"
-"            });"
-"        });"
-"    </script>"
-"</body>"
-"</html>";
+// 脚本路径配置
+#define PROCESS_SCRIPT "./process_string.sh"
+#define INDEX_HTML "index.html"
+
+// HTML 页面内容 - 简化版本，避免可能的格式问题
+// 在服务器代码中添加文件读取函数
+char* read_file_contents(const char* filename) {
+    FILE* file = fopen(filename, "r");
+    if (!file) {
+        DEBUG_PRINT("无法打开文件: %s\n", filename);
+        return NULL;
+    }
+    
+    fseek(file, 0, SEEK_END);
+    long length = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    char* content = malloc(length + 1);
+    if (!content) {
+        fclose(file);
+        return NULL;
+    }
+    
+    fread(content, 1, length, file);
+    content[length] = '\0';
+    
+    fclose(file);
+    return content;
+}
 
 // 处理根路径请求
 void root_handler(struct evhttp_request *req, void *arg) {
     DEBUG_PRINT("处理根路径请求\n");
+    
+    // 添加 CORS 头，避免跨域问题
+    struct evkeyvalq* headers = evhttp_request_get_output_headers(req);
+    evhttp_add_header(headers, "Content-Type", "text/html; charset=UTF-8");
+    evhttp_add_header(headers, "Access-Control-Allow-Origin", "*");
+    evhttp_add_header(headers, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    evhttp_add_header(headers, "Access-Control-Allow-Headers", "Content-Type");
     
     struct evbuffer *buf = evbuffer_new();
     if (!buf) {
@@ -82,22 +70,37 @@ void root_handler(struct evhttp_request *req, void *arg) {
         return;
     }
     
-    // 设置 HTTP 头
-    evhttp_add_header(evhttp_request_get_output_headers(req), 
-                     "Content-Type", "text/html; charset=UTF-8");
-    
-    // 写入 HTML 内容
-    evbuffer_add_printf(buf, "%s", index_html);
-    
-    // 发送响应
+       // 从文件读取HTML内容
+    char* html_content = read_file_contents(INDEX_HTML);
+    if (!html_content) {
+        // 如果文件读取失败，使用备用内容
+        html_content = strdup("<html><body><h1>错误：无法加载页面</h1></body></html>");
+    }
+
+    evbuffer_add_printf(buf, "%s", html_content);
     evhttp_send_reply(req, HTTP_OK, "OK", buf);
     evbuffer_free(buf);
     
     DEBUG_PRINT("根路径请求处理完成\n");
 }
 
+// 处理 OPTIONS 请求（CORS 预检）
+void options_handler(struct evhttp_request *req, void *arg) {
+    DEBUG_PRINT("处理 OPTIONS 请求\n");
+    
+    struct evkeyvalq* headers = evhttp_request_get_output_headers(req);
+    evhttp_add_header(headers, "Access-Control-Allow-Origin", "*");
+    evhttp_add_header(headers, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    evhttp_add_header(headers, "Access-Control-Allow-Headers", "Content-Type");
+    evhttp_add_header(headers, "Access-Control-Max-Age", "86400");
+    
+    evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+}
+
 // URL 解码函数
 char* url_decode(const char* src) {
+    if (!src) return NULL;
+    
     DEBUG_PRINT("解码 URL: %s\n", src);
     
     size_t src_len = strlen(src);
@@ -126,9 +129,143 @@ char* url_decode(const char* src) {
     return decoded;
 }
 
+// 获取 Content-Type 头
+const char* get_content_type(struct evhttp_request *req) {
+    struct evkeyvalq* headers = evhttp_request_get_input_headers(req);
+    const char* content_type = evhttp_find_header(headers, "Content-Type");
+    DEBUG_PRINT("Content-Type: %s\n", content_type ? content_type : "NULL");
+    return content_type;
+}
+
+// 安全的字符串复制函数
+char* safe_strdup(const char* str) {
+    if (!str) return NULL;
+    return strdup(str);
+}
+
+// 调用外部脚本处理字符串
+char* call_process_script(const char* input_string) {
+    DEBUG_PRINT("调用处理脚本: %s, 输入: %s\n", PROCESS_SCRIPT, input_string);
+    
+    // 检查脚本是否存在且可执行
+    if (access(PROCESS_SCRIPT, X_OK) != 0) {
+        DEBUG_PRINT("脚本不存在或不可执行: %s, 错误: %s\n", PROCESS_SCRIPT, strerror(errno));
+        char cmd[256] = {0};
+        
+        snprintf(cmd, sizeof(cmd), "%s \"%s\"", PROCESS_SCRIPT, input_string);
+        // 创建默认脚本
+        FILE* script_file = fopen(PROCESS_SCRIPT, "w");
+        if (script_file) {
+            fprintf(script_file, "#!/bin/bash\n");
+            fprintf(script_file, "echo \"处理脚本被调用，输入参数: $1\"\n");
+            fprintf(script_file, "echo \"字符串长度: ${#1}\"\n");
+            fprintf(script_file, "echo \"当前时间: $(date)\"\n");
+            fclose(script_file);
+            chmod(PROCESS_SCRIPT, 0755);
+            DEBUG_PRINT("已创建默认脚本: %s\n", PROCESS_SCRIPT);
+        } else {
+            DEBUG_PRINT("创建默认脚本失败: %s\n", strerror(errno));
+            return safe_strdup("警告：使用内置处理（脚本创建失败）");
+        }
+    }
+    
+    int pipefd[2];
+    pid_t pid;
+    
+    // 创建管道
+    if (pipe(pipefd) == -1) {
+        DEBUG_PRINT("创建管道失败: %s\n", strerror(errno));
+        return safe_strdup("错误：无法创建进程通信管道");
+    }
+    
+    // 创建子进程
+    pid = fork();
+    if (pid == -1) {
+        DEBUG_PRINT("创建子进程失败: %s\n", strerror(errno));
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return safe_strdup("错误：无法创建处理进程");
+    }
+    
+    if (pid == 0) {
+        // 子进程
+        close(pipefd[0]); // 关闭读端
+        
+        // 将标准输出重定向到管道写端
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO); // 重定向错误输出
+        close(pipefd[1]);
+        
+        // 执行脚本
+        execl("/bin/bash", "bash", PROCESS_SCRIPT, input_string, NULL);
+        
+        // 如果执行失败
+        fprintf(stderr, "execl failed: %s\n", strerror(errno));
+        exit(1);
+    } else {
+        // 父进程
+        close(pipefd[1]); // 关闭写端
+        
+        char buffer[1024];
+        ssize_t bytes_read;
+        size_t total_size = 0;
+        char* output = malloc(4096);
+        if (!output) {
+            DEBUG_PRINT("内存分配失败\n");
+            close(pipefd[0]);
+            return safe_strdup("错误：内存分配失败");
+        }
+        output[0] = '\0';
+        
+        while ((bytes_read = read(pipefd[0], buffer, sizeof(buffer) - 1)) > 0) {
+            buffer[bytes_read] = '\0';
+            
+            // 检查是否需要更多空间
+            if (total_size + bytes_read >= 4095) {
+                DEBUG_PRINT("输出过长，截断\n");
+                break;
+            }
+            
+            strcat(output + total_size, buffer);
+            total_size += bytes_read;
+        }
+        
+        close(pipefd[0]);
+        
+        // 等待子进程结束
+        int status;
+        waitpid(pid, &status, 0);
+        
+        if (WIFEXITED(status)) {
+            int exit_status = WEXITSTATUS(status);
+            DEBUG_PRINT("脚本退出状态: %d\n", exit_status);
+            
+            if (exit_status != 0) {
+                DEBUG_PRINT("脚本执行失败，退出状态: %d\n", exit_status);
+                char* error_msg = malloc(256);
+                snprintf(error_msg, 256, "错误：脚本执行失败 (退出码: %d)", exit_status);
+                free(output);
+                return error_msg;
+            }
+        } else {
+            DEBUG_PRINT("脚本异常终止\n");
+            free(output);
+            return safe_strdup("错误：脚本异常终止");
+        }
+        
+        DEBUG_PRINT("脚本输出长度: %zu\n", strlen(output));
+        return output;
+    }
+}
+
 // 处理提交请求
 void submit_handler(struct evhttp_request *req, void *arg) {
-    DEBUG_PRINT("处理提交请求\n");
+    DEBUG_PRINT("处理提交请求，URI: %s\n", evhttp_request_get_uri(req));
+    
+    // 添加 CORS 头
+    struct evkeyvalq* headers = evhttp_request_get_output_headers(req);
+    evhttp_add_header(headers, "Access-Control-Allow-Origin", "*");
+    evhttp_add_header(headers, "Content-Type", "text/plain; charset=UTF-8");
     
     struct evbuffer *buf = evbuffer_new();
     if (!buf) {
@@ -138,9 +275,20 @@ void submit_handler(struct evhttp_request *req, void *arg) {
     }
     
     // 检查请求方法
-    if (evhttp_request_get_command(req) != EVHTTP_REQ_POST) {
-        DEBUG_PRINT("不支持的请求方法: %d\n", evhttp_request_get_command(req));
-        evhttp_send_error(req, HTTP_BADMETHOD, "Only POST method is supported");
+    enum evhttp_cmd_type method = evhttp_request_get_command(req);
+    DEBUG_PRINT("请求方法: %d\n", method);
+    
+    if (method == EVHTTP_REQ_OPTIONS) {
+        // 处理 OPTIONS 请求
+        options_handler(req, arg);
+        evbuffer_free(buf);
+        return;
+    }
+    
+    if (method != EVHTTP_REQ_POST) {
+        DEBUG_PRINT("不支持的请求方法: %d\n", method);
+        evbuffer_add_printf(buf, "错误：只支持 POST 方法");
+        evhttp_send_reply(req, HTTP_BADMETHOD, "Method Not Allowed", buf);
         evbuffer_free(buf);
         return;
     }
@@ -160,39 +308,54 @@ void submit_handler(struct evhttp_request *req, void *arg) {
             return;
         }
         
-        evbuffer_copyout(input_buf, post_data, len);
+        evbuffer_remove(input_buf, post_data, len);
         post_data[len] = '\0';
         
         DEBUG_PRINT("原始 POST 数据: %s\n", post_data);
         
-        // 解析表单数据
         char *input_string = NULL;
         char *decoded_string = NULL;
         
-        char *token = strtok(post_data, "&");
-        while (token != NULL) {
-            DEBUG_PRINT("解析参数: %s\n", token);
-            
-            if (strncmp(token, "inputString=", 12) == 0) {
-                input_string = token + 12;
-                decoded_string = url_decode(input_string);
-                break;
-            }
-            token = strtok(NULL, "&");
-        }
+        const char* content_type = get_content_type(req);
         
-        // 设置响应头
-        evhttp_add_header(evhttp_request_get_output_headers(req), 
-                         "Content-Type", "text/plain; charset=UTF-8");
+        if (content_type && strstr(content_type, "multipart/form-data") != NULL) {
+            DEBUG_PRINT("处理 multipart/form-data - 暂不支持\n");
+            evbuffer_add_printf(buf, "错误：暂不支持 multipart/form-data 格式");
+        } else {
+            DEBUG_PRINT("处理 application/x-www-form-urlencoded\n");
+            // 简单的参数解析
+            char* key = "inputString=";
+            char* param_start = strstr(post_data, key);
+            if (param_start) {
+                param_start += strlen(key);
+                char* param_end = strchr(param_start, '&');
+                if (param_end) {
+                    *param_end = '\0';
+                }
+                input_string = param_start;
+                decoded_string = url_decode(input_string);
+            }
+        }
         
         if (decoded_string && strlen(decoded_string) > 0) {
             DEBUG_PRINT("收到字符串: %s\n", decoded_string);
             printf("服务器日志: 收到字符串 - \"%s\"\n", decoded_string);
-            evbuffer_add_printf(buf, "服务器已收到您的字符串: \"%s\"", decoded_string);
+            
+            // 调用脚本处理字符串
+            char* script_output = call_process_script(decoded_string);
+            
+            if (script_output) {
+                evbuffer_add_printf(buf, "成功！收到字符串: \"%s\"\n处理结果:\n%s", 
+                                   decoded_string, script_output);
+                free(script_output);
+            } else {
+                evbuffer_add_printf(buf, "成功！收到字符串: \"%s\"\n（脚本无输出）", decoded_string);
+            }
+            
             free(decoded_string);
         } else {
             DEBUG_PRINT("未接收到有效的字符串\n");
-            evbuffer_add_printf(buf, "错误：未接收到有效的字符串");
+            evbuffer_add_printf(buf, "错误：未接收到有效的字符串。接收到的数据: %s", post_data);
         }
         
         free(post_data);
@@ -209,7 +372,12 @@ void submit_handler(struct evhttp_request *req, void *arg) {
 
 // 通用错误处理
 void generic_handler(struct evhttp_request *req, void *arg) {
-    DEBUG_PRINT("处理未找到的路径: %s\n", evhttp_request_get_uri(req));
+    const char* uri = evhttp_request_get_uri(req);
+    DEBUG_PRINT("处理未找到的路径: %s\n", uri);
+    
+    // 添加 CORS 头
+    struct evkeyvalq* headers = evhttp_request_get_output_headers(req);
+    evhttp_add_header(headers, "Access-Control-Allow-Origin", "*");
     
     struct evbuffer *buf = evbuffer_new();
     if (!buf) {
@@ -217,7 +385,7 @@ void generic_handler(struct evhttp_request *req, void *arg) {
         return;
     }
     
-    evbuffer_add_printf(buf, "404 - 页面未找到");
+    evbuffer_add_printf(buf, "404 - 页面未找到。请求的路径: %s", uri);
     evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", buf);
     evbuffer_free(buf);
 }
@@ -249,6 +417,13 @@ int main(int argc, char *argv[]) {
     
     DEBUG_PRINT("使用端口: %d\n", port);
     
+    // 检查脚本
+    if (access(PROCESS_SCRIPT, X_OK) != 0) {
+        printf("提示: 处理脚本 %s 不存在，将在首次使用时创建默认脚本\n", PROCESS_SCRIPT);
+    } else {
+        printf("处理脚本可用: %s\n", PROCESS_SCRIPT);
+    }
+    
     // 创建 event base
     base = event_base_new();
     if (!base) {
@@ -277,7 +452,7 @@ int main(int argc, char *argv[]) {
     // 绑定到端口
     handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", port);
     if (!handle) {
-        fprintf(stderr, "绑定到端口 %d 失败\n", port);
+        fprintf(stderr, "绑定到端口 %d 失败: %s\n", port, strerror(errno));
         return 1;
     }
     
