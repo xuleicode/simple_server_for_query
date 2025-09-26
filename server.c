@@ -23,7 +23,7 @@
 #endif
 
 // 脚本路径配置
-#define PROCESS_SCRIPT "./process_string.sh"
+#define PROCESS_SCRIPT "./getauth.sh"
 #define INDEX_HTML "index.html"
 
 // HTML 页面内容 - 简化版本，避免可能的格式问题
@@ -345,11 +345,11 @@ void submit_handler(struct evhttp_request *req, void *arg) {
             char* script_output = call_process_script(decoded_string);
             
             if (script_output) {
-                evbuffer_add_printf(buf, "成功！收到字符串: \"%s\"\n处理结果:\n%s", 
+                evbuffer_add_printf(buf, "收到字符串: \"%s\"\n处理结果:\n%s", 
                                    decoded_string, script_output);
                 free(script_output);
             } else {
-                evbuffer_add_printf(buf, "成功！收到字符串: \"%s\"\n（脚本无输出）", decoded_string);
+                evbuffer_add_printf(buf, "收到字符串: \"%s\"\n（无输出）", decoded_string);
             }
             
             free(decoded_string);

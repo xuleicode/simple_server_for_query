@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>字符串提交测试</title>
+    <title>超声AI授权获取</title>
     <style>
         * {
             margin: 0;
@@ -192,16 +192,16 @@
 </head>
 <body>
     <div class="container">
-        <h1>字符串提交测试</h1>
+        <h1>超声AI授权码获取</h1>
         
         <div class="form-group">
-            <label for="textInput">请输入字符串：</label>
-            <input type="text" id="textInput" placeholder="在这里输入任何文本..." value="Hello World">
+            <label for="textInput">请输入机器ID：</label>
+            <input type="text" id="textInput" placeholder="在这里输入要授权的机器ID，长度36..." value="">
         </div>
         
         <div class="button-group">
             <button onclick="submitData()">
-                <i>✓</i> 提交字符串
+                <i>✓</i> 提交ID
             </button>
             <button class="secondary" onclick="clearInput()">
                 <i>×</i> 清空输入
@@ -214,7 +214,7 @@
         </div>
         
         <div class="footer">
-            <p>HTTP 服务器测试界面 &copy; 2023</p>
+            <p>超声AI授权码获取服务 &copy; 2025</p>
         </div>
     </div>
 
@@ -225,7 +225,7 @@
             const resultDiv = document.getElementById('result');
             
             if (!text.trim()) {
-                resultDiv.innerHTML = '请输入有效的字符串！';
+                resultDiv.innerHTML = '请输入有效的机器ID！';
                 resultContainer.classList.add('error');
                 resultContainer.classList.remove('success');
                 return;
