@@ -10,6 +10,10 @@
 #include <sys/wait.h>
 #include <errno.h>
 
+#include <spdlog/spdlog.h>
+#include <spdlog/sinks/rotating_file_sink.h> // 用于 rotating_logger_mt
+#include <filesystem> // 用于创建日志目录（C++17）
+
 // 调试宏定义
 #ifdef DEBUG
 #define DEBUG_PRINT(fmt, ...) \
@@ -39,13 +43,19 @@ char* read_file_contents(const char* filename) {
     long length = ftell(file);
     fseek(file, 0, SEEK_SET);
     
-    char* content = malloc(length + 1);
+    char* content = static_cast<char*>(malloc(length + 1));
     if (!content) {
         fclose(file);
         return NULL;
     }
     
-    fread(content, 1, length, file);
+    auto size_read = fread(content, 1, length, file);
+    if (size_read != length) {
+        DEBUG_PRINT("读取文件 %s 时出错: %s\n", filename, strerror(errno));
+        free(content);
+        fclose(file);
+        return NULL;
+    }
     content[length] = '\0';
     
     fclose(file);
@@ -104,7 +114,7 @@ char* url_decode(const char* src) {
     DEBUG_PRINT("解码 URL: %s\n", src);
     
     size_t src_len = strlen(src);
-    char* decoded = malloc(src_len + 1);
+    char* decoded = static_cast<char*>(malloc(src_len + 1));
     if (!decoded) {
         DEBUG_PRINT("内存分配失败\n");
         return NULL;
@@ -209,7 +219,7 @@ char* call_process_script(const char* input_string) {
         char buffer[1024];
         ssize_t bytes_read;
         size_t total_size = 0;
-        char* output = malloc(4096);
+        char* output = static_cast<char*>(malloc(4096));
         if (!output) {
             DEBUG_PRINT("内存分配失败\n");
             close(pipefd[0]);
@@ -242,7 +252,7 @@ char* call_process_script(const char* input_string) {
             
             if (exit_status != 0) {
                 DEBUG_PRINT("脚本执行失败，退出状态: %d\n", exit_status);
-                char* error_msg = malloc(256);
+                char* error_msg = static_cast<char*>(malloc(256));
                 snprintf(error_msg, 256, "错误：脚本执行失败 (退出码: %d)", exit_status);
                 free(output);
                 return error_msg;
@@ -300,7 +310,7 @@ void submit_handler(struct evhttp_request *req, void *arg) {
     DEBUG_PRINT("接收到 %zu 字节的 POST 数据\n", len);
     
     if (len > 0) {
-        char *post_data = malloc(len + 1);
+        char *post_data = static_cast<char*>(malloc(len + 1));
         if (!post_data) {
             DEBUG_PRINT("内存分配失败\n");
             evhttp_send_error(req, HTTP_INTERNAL, "Memory allocation failed");
@@ -324,7 +334,7 @@ void submit_handler(struct evhttp_request *req, void *arg) {
         } else {
             DEBUG_PRINT("处理 application/x-www-form-urlencoded\n");
             // 简单的参数解析
-            char* key = "inputString=";
+            const char* key = "inputString=";
             char* param_start = strstr(post_data, key);
             if (param_start) {
                 param_start += strlen(key);
@@ -340,9 +350,11 @@ void submit_handler(struct evhttp_request *req, void *arg) {
         if (decoded_string && strlen(decoded_string) > 0) {
             DEBUG_PRINT("收到字符串: %s\n", decoded_string);
             printf("服务器日志: 收到字符串 - \"%s\"\n", decoded_string);
-            
+            spdlog::info("收到字符串: \"{}\"", decoded_string);
             // 调用脚本处理字符串
             char* script_output = call_process_script(decoded_string);
+            printf("服务器日志: 脚本处理结果 - \"%s\"\n", script_output ? script_output : "无输出");
+            spdlog::info("处理结果: \"{}\"", script_output ? script_output : "无输出");
             
             if (script_output) {
                 evbuffer_add_printf(buf, "收到字符串: \"%s\"\n处理结果:\n%s", 
@@ -355,6 +367,7 @@ void submit_handler(struct evhttp_request *req, void *arg) {
             free(decoded_string);
         } else {
             DEBUG_PRINT("未接收到有效的字符串\n");
+            spdlog::info("错误：未接收到有效的字符串。接收到的数据: \"{}\"", post_data);
             evbuffer_add_printf(buf, "错误：未接收到有效的字符串。接收到的数据: %s", post_data);
         }
         
@@ -384,7 +397,7 @@ void generic_handler(struct evhttp_request *req, void *arg) {
         evhttp_send_error(req, HTTP_INTERNAL, "Failed to create buffer");
         return;
     }
-    
+    spdlog::info("404 - 页面未找到。请求的路径: {}", uri);
     evbuffer_add_printf(buf, "404 - 页面未找到。请求的路径: %s", uri);
     evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", buf);
     evbuffer_free(buf);
@@ -397,8 +410,54 @@ void signal_handler(int sig) {
     exit(0);
 }
 
+bool initLog()
+{
+      // 确保日志目录存在
+    std::string log_dir = "logs";
+    if (!std::filesystem::exists(log_dir)) {
+        std::filesystem::create_directories(log_dir);
+    }
+
+    try {
+        // 1. 创建一个循环文件记录器
+        // 参数：记录器名称, 文件路径, 单个文件最大大小(字节), 保留的旧文件数量
+        auto max_size = 1024 * 1024 * 5; // 5MB
+        auto max_files = 3;
+        auto file_logger = spdlog::rotating_logger_mt("file_logger", "logs/uranus_auth_server.log", max_size, max_files);
+
+        // 2. 设置为全局默认记录器（可选，这样可以直接使用 spdlog::info() 等函数）
+        spdlog::set_default_logger(file_logger);
+
+        // 3. 设置日志级别（只记录该级别及以上的日志）
+        file_logger->set_level(spdlog::level::debug);
+        // 或设置全局级别：spdlog::set_level(spdlog::level::info);
+
+        // 4. 设置日志格式 [时间] [级别] [线程ID] 正文
+        file_logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [thread %t] %v");
+
+        // // 5. 设置遇到指定级别及以上日志时立即刷新到文件，而非缓冲:cite[2]:cite[8]
+        file_logger->flush_on(spdlog::level::info);
+
+        // 开始记录日志
+        spdlog::info("日志初始化成功！");
+
+        // 程序结束时，spdlog 会自动刷新并关闭日志文件。
+        // 但显式关闭是一个好习惯，尤其是在长期运行的程序中:cite[9]。
+        return true;
+    }
+    catch (const spdlog::spdlog_ex& ex) {
+        // 处理创建记录器时可能发生的异常（如权限问题、路径无效等）
+        printf("日志初始化失败: %s\n", ex.what());
+        return false;
+    }
+    return false;
+}
+
 int main(int argc, char *argv[]) {
     DEBUG_PRINT("启动 HTTP 服务器\n");
+
+    bool bInitlog = initLog();
+
     
     struct event_base *base;
     struct evhttp *http;
@@ -406,79 +465,90 @@ int main(int argc, char *argv[]) {
     
     unsigned short port = 8080;
     
-    // 解析命令行参数
-    if (argc > 1) {
-        port = atoi(argv[1]);
-        if (port == 0) {
-            fprintf(stderr, "无效的端口号: %s\n", argv[1]);
-            return 1;
+    int iReturn = 1;
+    do
+    {
+        // 解析命令行参数
+        if (argc > 1) {
+            port = atoi(argv[1]);
+            if (port == 0) {
+                fprintf(stderr, "无效的端口号: %s\n", argv[1]);
+                break;
+            }
         }
+        
+        DEBUG_PRINT("使用端口: %d\n", port);
+        
+        // 检查脚本
+        if (access(PROCESS_SCRIPT, X_OK) != 0) {
+            spdlog::info("提示: 处理脚本 {} 不存在，将在首次使用时创建默认脚本", PROCESS_SCRIPT);
+        } else {
+            spdlog::info("提示: 处理脚本 {} 存在", PROCESS_SCRIPT);
+        }
+        
+        // 创建 event base
+        base = event_base_new();
+        if (!base) {
+            fprintf(stderr, "创建 event base 失败\n");
+            break;
+        }
+        
+        DEBUG_PRINT("event base 创建成功\n");
+        
+        // 创建 HTTP 服务器
+        http = evhttp_new(base);
+        if (!http) {
+            fprintf(stderr, "创建 HTTP 服务器失败\n");
+            break;
+        }
+        
+        DEBUG_PRINT("HTTP 服务器创建成功\n");
+        
+        // 设置请求处理回调
+        evhttp_set_cb(http, "/", root_handler, NULL);
+        evhttp_set_cb(http, "/submit", submit_handler, NULL);
+        evhttp_set_gencb(http, generic_handler, NULL);
+        
+        DEBUG_PRINT("请求处理器设置完成\n");
+        
+        // 绑定到端口
+        handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", port);
+        if (!handle) {
+            fprintf(stderr, "绑定到端口 %d 失败: %s\n", port, strerror(errno));
+            break;
+        }
+        
+        DEBUG_PRINT("端口绑定成功\n");
+        
+        // 设置信号处理
+        signal(SIGINT, signal_handler);
+        signal(SIGTERM, signal_handler);
+        
+        printf("HTTP 服务器启动成功，监听端口: %d\n", port);
+        printf("访问 http://localhost:%d 来测试\n", port);
+        printf("按 Ctrl+C 退出\n");
+        
+    #ifdef DEBUG
+        printf("=== 调试模式已启用 ===\n");
+    #endif
+        
+        // 进入事件循环
+        DEBUG_PRINT("开始事件循环\n");
+        event_base_dispatch(base);
+        
+        // 清理资源
+        DEBUG_PRINT("清理资源\n");
+        evhttp_free(http);
+        event_base_free(base);
+        
+        DEBUG_PRINT("服务器退出\n");
+        iReturn = 0;
+    } while(0);
+
+
+    if(bInitlog)
+    {
+        spdlog::shutdown();
     }
-    
-    DEBUG_PRINT("使用端口: %d\n", port);
-    
-    // 检查脚本
-    if (access(PROCESS_SCRIPT, X_OK) != 0) {
-        printf("提示: 处理脚本 %s 不存在，将在首次使用时创建默认脚本\n", PROCESS_SCRIPT);
-    } else {
-        printf("处理脚本可用: %s\n", PROCESS_SCRIPT);
-    }
-    
-    // 创建 event base
-    base = event_base_new();
-    if (!base) {
-        fprintf(stderr, "创建 event base 失败\n");
-        return 1;
-    }
-    
-    DEBUG_PRINT("event base 创建成功\n");
-    
-    // 创建 HTTP 服务器
-    http = evhttp_new(base);
-    if (!http) {
-        fprintf(stderr, "创建 HTTP 服务器失败\n");
-        return 1;
-    }
-    
-    DEBUG_PRINT("HTTP 服务器创建成功\n");
-    
-    // 设置请求处理回调
-    evhttp_set_cb(http, "/", root_handler, NULL);
-    evhttp_set_cb(http, "/submit", submit_handler, NULL);
-    evhttp_set_gencb(http, generic_handler, NULL);
-    
-    DEBUG_PRINT("请求处理器设置完成\n");
-    
-    // 绑定到端口
-    handle = evhttp_bind_socket_with_handle(http, "0.0.0.0", port);
-    if (!handle) {
-        fprintf(stderr, "绑定到端口 %d 失败: %s\n", port, strerror(errno));
-        return 1;
-    }
-    
-    DEBUG_PRINT("端口绑定成功\n");
-    
-    // 设置信号处理
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    
-    printf("HTTP 服务器启动成功，监听端口: %d\n", port);
-    printf("访问 http://localhost:%d 来测试\n", port);
-    printf("按 Ctrl+C 退出\n");
-    
-#ifdef DEBUG
-    printf("=== 调试模式已启用 ===\n");
-#endif
-    
-    // 进入事件循环
-    DEBUG_PRINT("开始事件循环\n");
-    event_base_dispatch(base);
-    
-    // 清理资源
-    DEBUG_PRINT("清理资源\n");
-    evhttp_free(http);
-    event_base_free(base);
-    
-    DEBUG_PRINT("服务器退出\n");
-    return 0;
+    return iReturn;
 }

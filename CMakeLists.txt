@@ -5,8 +5,11 @@ project(http_server)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBEVENT REQUIRED libevent)
 
+# 查找 libspdlog 库
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SPDLOG REQUIRED spdlog)
 # 设置编译器标志
-set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD 17)
 
 # 设置编译类型（Debug/Release）
 if(NOT CMAKE_BUILD_TYPE)
@@ -23,12 +26,13 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O2 -DNDEBUG")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra")
 
 # 创建可执行文件
-add_executable(server server.c)
+add_executable(uranus_auth_server server.cpp)
 
 # 链接库
-target_link_libraries(server ${LIBEVENT_LIBRARIES})
-target_include_directories(server PRIVATE ${LIBEVENT_INCLUDE_DIRS})
-
+target_link_libraries(uranus_auth_server ${LIBEVENT_LIBRARIES})
+target_link_libraries(uranus_auth_server ${SPDLOG_LIBRARIES})
+target_include_directories(uranus_auth_server PRIVATE ${LIBEVENT_INCLUDE_DIRS})
+target_include_directories(uranus_auth_server PRIVATE ${SPDLOG_INCLUDE_DIRS})
 # 添加自定义构建类型：RelWithDebInfo（带调试信息的发布版本）
 set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -O2 -g -DNDEBUG")
 
@@ -36,3 +40,7 @@ set(CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} -O2 -g -DNDEBU
 message(STATUS "Libevent 包含目录: ${LIBEVENT_INCLUDE_DIRS}")
 message(STATUS "Libevent 库目录: ${LIBEVENT_LIBRARY_DIRS}")
 message(STATUS "Libevent 库: ${LIBEVENT_LIBRARIES}")
+
+message(STATUS "libspdlog 包含目录: ${SPDLOG_INCLUDE_DIRS}")
+message(STATUS "libspdlog 库目录: ${SPDLOG_LIBRARY_DIRS}")
+message(STATUS "libspdlog 库: ${SPDLOG_LIBRARIES}")
