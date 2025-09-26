@@ -13,6 +13,8 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/rotating_file_sink.h> // 用于 rotating_logger_mt
 #include <filesystem> // 用于创建日志目录（C++17）
+#include <arpa/inet.h>  // For inet_ntop
+#include <netinet/in.h> // For sockaddr_in and sockaddr_in6
 
 // 调试宏定义
 #ifdef DEBUG
@@ -30,7 +32,58 @@
 #define PROCESS_SCRIPT "./getauth.sh"
 #define INDEX_HTML "index.html"
 
-// HTML 页面内容 - 简化版本，避免可能的格式问题
+// 获取客户端IP地址
+const char* get_client_ip(struct evhttp_request *req) {
+    static char ip_str[INET6_ADDRSTRLEN];
+    
+    // 首先尝试从X-Forwarded-For头获取（如果 behind proxy）
+    struct evkeyvalq* headers = evhttp_request_get_input_headers(req);
+    const char* x_forwarded_for = evhttp_find_header(headers, "X-Forwarded-For");
+    if (x_forwarded_for) {
+        // 取第一个IP（可能有多个，用逗号分隔）
+        const char* comma = strchr(x_forwarded_for, ',');
+        if (comma) {
+            size_t len = comma - x_forwarded_for;
+            strncpy(ip_str, x_forwarded_for, len);
+            ip_str[len] = '\0';
+        } else {
+            strncpy(ip_str, x_forwarded_for, sizeof(ip_str) - 1);
+        }
+        ip_str[sizeof(ip_str) - 1] = '\0';
+        DEBUG_PRINT("从X-Forwarded-For获取客户端IP: %s\n", ip_str);
+        return ip_str;
+    }
+    
+    // 如果没有代理，直接获取连接的对端地址
+    struct evhttp_connection* conn = evhttp_request_get_connection(req);
+    if (!conn) {
+        DEBUG_PRINT("无法获取连接信息\n");
+        return "未知";
+    }
+    
+    const struct sockaddr* sa = evhttp_connection_get_addr(conn);
+    if (!sa) {
+        DEBUG_PRINT("无法获取对端地址\n");
+        return "未知";
+    }
+    
+    if (sa->sa_family == AF_INET) {
+        // IPv4
+        struct sockaddr_in* sin = (struct sockaddr_in*)sa;
+        inet_ntop(AF_INET, &sin->sin_addr, ip_str, sizeof(ip_str));
+    } else if (sa->sa_family == AF_INET6) {
+        // IPv6
+        struct sockaddr_in6* sin6 = (struct sockaddr_in6*)sa;
+        inet_ntop(AF_INET6, &sin6->sin6_addr, ip_str, sizeof(ip_str));
+    } else {
+        DEBUG_PRINT("未知的地址族: %d\n", sa->sa_family);
+        return "未知";
+    }
+    
+    DEBUG_PRINT("获取客户端IP: %s\n", ip_str);
+    return ip_str;
+}
+
 // 在服务器代码中添加文件读取函数
 char* read_file_contents(const char* filename) {
     FILE* file = fopen(filename, "r");
@@ -270,7 +323,9 @@ char* call_process_script(const char* input_string) {
 
 // 处理提交请求
 void submit_handler(struct evhttp_request *req, void *arg) {
-    DEBUG_PRINT("处理提交请求，URI: %s\n", evhttp_request_get_uri(req));
+    const char* client_ip = get_client_ip(req);
+    DEBUG_PRINT("客户端 IP: %s\n", client_ip);
+    spdlog::info("客户端 IP: {1}, URI: {0}, ", evhttp_request_get_uri(req), client_ip);
     
     // 添加 CORS 头
     struct evkeyvalq* headers = evhttp_request_get_output_headers(req);
@@ -482,10 +537,8 @@ int main(int argc, char *argv[]) {
         // 检查脚本
         if (access(PROCESS_SCRIPT, X_OK) != 0) {
             spdlog::info("提示: 处理脚本 {} 不存在，将在首次使用时创建默认脚本", PROCESS_SCRIPT);
-        } else {
-            spdlog::info("提示: 处理脚本 {} 存在", PROCESS_SCRIPT);
         }
-        
+
         // 创建 event base
         base = event_base_new();
         if (!base) {

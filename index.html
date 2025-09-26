@@ -230,7 +230,7 @@
                 resultContainer.classList.remove('success');
                 return;
             } else if (text.length !== 36) {
-                resultDiv.innerHTML = '机器ID长度必须为36个字符！';
+                resultDiv.innerHTML = `机器ID长度必须为36个字符！当前长度为${text.length}个字符`;
                 resultContainer.classList.add('error');
                 resultContainer.classList.remove('success');
                 return;
